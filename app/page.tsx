@@ -30,14 +30,13 @@ export default function Home() {
   const [measuring, setMeasuring] = useState(false);
   const [status, setStatus] = useState("측정 버튼을 눌러주세요.");
   const [currentSpeed, setCurrentSpeed] = useState<{ download: number; upload: number } | null>(null);
+  const [savedLocation, setSavedLocation] = useState<{ lat: number; lng: number } | null>(null);
 
-  // 로컬스토리지에서 기록 불러오기
   useEffect(() => {
     const saved = localStorage.getItem("signal-records");
     if (saved) setRecords(JSON.parse(saved));
   }, []);
 
-  // 지도 초기화
   useEffect(() => {
     if (!mapRef.current || mapInstanceRef.current) return;
     import("leaflet").then((L) => {
@@ -49,7 +48,6 @@ export default function Home() {
     });
   }, []);
 
-  // 기록 변경 시 마커 업데이트
   useEffect(() => {
     if (!mapInstanceRef.current) return;
     import("leaflet").then((L) => {
@@ -79,7 +77,6 @@ export default function Home() {
     });
   }, [records]);
 
-  // 다운로드 속도 측정
   const measureDownload = async (): Promise<number> => {
     const url = `https://speed.cloudflare.com/__down?bytes=5000000&_=${Date.now()}`;
     const start = performance.now();
@@ -90,7 +87,6 @@ export default function Home() {
     return Math.round(mbps * 10) / 10;
   };
 
-  // 업로드 속도 측정
   const measureUpload = async (): Promise<number> => {
     const data = new Uint8Array(2 * 1024 * 1024);
     const url = `https://speed.cloudflare.com/__up?_=${Date.now()}`;
@@ -103,17 +99,61 @@ export default function Home() {
     return Math.round(mbps * 10) / 10;
   };
 
-  // 측정 시작
+  // 위치 저장 함수 (measure 함수 밖)
+  const saveLocation = async () => {
+    setMeasuring(true);
+    setStatus("📍 위치 저장 중...");
+    try {
+      const pos = await new Promise<GeolocationPosition>((resolve, reject) =>
+        navigator.geolocation.getCurrentPosition(resolve, reject, { timeout: 10000 })
+      );
+      const { latitude: lat, longitude: lng } = pos.coords;
+      setSavedLocation({ lat, lng });
+      setStatus(`✅ 위치 저장됨! 이제 지하에서 속도 측정하세요.`);
+      if (mapInstanceRef.current) {
+        mapInstanceRef.current.setView([lat, lng], 15);
+      }
+    } catch (e: any) {
+      setStatus(`❌ 위치 저장 실패. 위치 권한을 허용해주세요.`);
+    } finally {
+      setMeasuring(false);
+    }
+  };
+
+  // CSV 내보내기 함수 (measure 함수 밖)
+  const exportCSV = () => {
+    const header = "시간,위도,경도,다운로드(Mbps),업로드(Mbps),상태\n";
+    const rows = records.map((r) =>
+      `${r.timestamp},${r.lat},${r.lng},${r.download},${r.upload},${getLabel(r.download)}`
+    ).join("\n");
+    const blob = new Blob([header + rows], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `signal-checker-${new Date().toLocaleDateString("ko-KR")}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   const measure = async () => {
     setMeasuring(true);
     setCurrentSpeed(null);
 
     try {
-      setStatus("📍 위치 가져오는 중...");
-      const pos = await new Promise<GeolocationPosition>((resolve, reject) =>
-        navigator.geolocation.getCurrentPosition(resolve, reject, { timeout: 10000 })
-      );
-      const { latitude: lat, longitude: lng } = pos.coords;
+      let lat: number, lng: number;
+
+      if (savedLocation) {
+        lat = savedLocation.lat;
+        lng = savedLocation.lng;
+        setStatus("⬇ 저장된 위치로 다운로드 측정 중...");
+      } else {
+        setStatus("📍 위치 가져오는 중...");
+        const pos = await new Promise<GeolocationPosition>((resolve, reject) =>
+          navigator.geolocation.getCurrentPosition(resolve, reject, { timeout: 10000 })
+        );
+        lat = pos.coords.latitude;
+        lng = pos.coords.longitude;
+      }
 
       setStatus("⬇ 다운로드 속도 측정 중...");
       const download = await measureDownload();
@@ -135,7 +175,6 @@ export default function Home() {
       setCurrentSpeed({ download, upload });
       setStatus(`✅ 측정 완료! ${getLabel(download)}`);
 
-      // 지도 이동
       if (mapInstanceRef.current) {
         mapInstanceRef.current.setView([lat, lng], 15);
       }
@@ -186,39 +225,55 @@ export default function Home() {
           </div>
         )}
 
+        {/* 저장된 위치 표시 */}
+        {savedLocation && (
+          <div style={{ fontSize: 12, color: "#00a886", marginBottom: 10, textAlign: "center" }}>
+            📍 저장된 위치: {savedLocation.lat.toFixed(4)}, {savedLocation.lng.toFixed(4)}
+            <button onClick={() => setSavedLocation(null)}
+              style={{ background: "none", border: "none", color: "#7a7a9a", cursor: "pointer", marginLeft: 8, fontSize: 12 }}>
+              ✕ 초기화
+            </button>
+          </div>
+        )}
+
         {/* 상태 */}
         <div style={{ fontSize: 13, color: "#a0a0c0", marginBottom: 12, textAlign: "center" }}>{status}</div>
 
-        {/* 측정 버튼 */}
-        <button
-          onClick={measure}
-          disabled={measuring}
-          style={{
-            width: "100%", padding: "14px",
-            background: measuring ? "#3a3a5c" : "#6c63ff",
-            color: "white", border: "none", borderRadius: 8,
-            fontSize: 15, fontWeight: 600, cursor: measuring ? "not-allowed" : "pointer",
-            transition: "background 0.2s", marginBottom: 16,
-          }}
-        >
-          {measuring ? "측정 중..." : "📍 현재 위치 속도 측정"}
-        </button>
+        {/* 측정 버튼 두 개 */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 16 }}>
+          <button onClick={saveLocation} disabled={measuring}
+            style={{ padding: "14px", background: measuring ? "#3a3a5c" : "#00a886", color: "white", border: "none", borderRadius: 8, fontSize: 14, fontWeight: 600, cursor: measuring ? "not-allowed" : "pointer", transition: "background 0.2s" }}>
+            📍 위치 저장
+          </button>
+          <button onClick={measure} disabled={measuring}
+            style={{ padding: "14px", background: measuring ? "#3a3a5c" : "#6c63ff", color: "white", border: "none", borderRadius: 8, fontSize: 14, fontWeight: 600, cursor: measuring ? "not-allowed" : "pointer", transition: "background 0.2s" }}>
+            📶 속도 측정
+          </button>
+        </div>
 
         {/* 기록 목록 */}
         {records.length > 0 && (
-          <div style={{ maxHeight: 180, overflowY: "auto" }}>
-            <div style={{ fontSize: 11, color: "#7a7a9a", marginBottom: 8, letterSpacing: "0.1em", textTransform: "uppercase" }}>최근 기록</div>
-            {records.slice(0, 10).map((r) => (
-              <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
-                <div style={{ width: 10, height: 10, borderRadius: "50%", background: getColor(r.download), flexShrink: 0 }} />
-                <div style={{ flex: 1 }}>
-                  <span style={{ fontSize: 13, color: "#e8e8f0" }}>⬇ {r.download} / ⬆ {r.upload} Mbps</span>
-                  <span style={{ fontSize: 11, color: "#7a7a9a", marginLeft: 8 }}>{r.timestamp}</span>
+          <div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+              <div style={{ fontSize: 11, color: "#7a7a9a", letterSpacing: "0.1em", textTransform: "uppercase" }}>최근 기록</div>
+              <button onClick={exportCSV}
+                style={{ background: "rgba(108,99,255,0.15)", border: "1px solid rgba(108,99,255,0.3)", color: "#6c63ff", borderRadius: 6, padding: "4px 12px", fontSize: 12, cursor: "pointer" }}>
+                CSV 내보내기
+              </button>
+            </div>
+            <div style={{ maxHeight: 180, overflowY: "auto" }}>
+              {records.slice(0, 10).map((r) => (
+                <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
+                  <div style={{ width: 10, height: 10, borderRadius: "50%", background: getColor(r.download), flexShrink: 0 }} />
+                  <div style={{ flex: 1 }}>
+                    <span style={{ fontSize: 13, color: "#e8e8f0" }}>⬇ {r.download} / ⬆ {r.upload} Mbps</span>
+                    <span style={{ fontSize: 11, color: "#7a7a9a", marginLeft: 8 }}>{r.timestamp}</span>
+                  </div>
+                  <button onClick={() => deleteRecord(r.id)}
+                    style={{ background: "none", border: "none", color: "#7a7a9a", cursor: "pointer", fontSize: 14 }}>✕</button>
                 </div>
-                <button onClick={() => deleteRecord(r.id)}
-                  style={{ background: "none", border: "none", color: "#7a7a9a", cursor: "pointer", fontSize: 14 }}>✕</button>
-              </div>
-            ))}
+              ))}
+            </div>
           </div>
         )}
       </div>
